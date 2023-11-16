@@ -1,5 +1,0 @@
-CREATE TABLE t0 ( c0 INT , c1 INT ) ;
-CREATE TABLE t1 ( c0 INT , c1 INT ) ;
-INSERT INTO t0 VALUES ( 1 , 2 ) , ( 3 , 4 ) ;
-INSERT INTO t0 VALUES ( 5 , 6 ) , ( 7 , 8 ) ;
-SELECT t0 . c0 FROM t0 CROSS JOIN t1 ;
