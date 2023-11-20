@@ -26,7 +26,7 @@
 	//连接器，用于连接数据库，根据数据库不同需要修改。本工具提供的连接器用于连接openGaussDB，使用libpq连接
 	Connector g_connector(HOST, USERNAME, PASSWORD, PORT, SERVERNAME);	//数据库名默认为test，硬编码在connector.cpp中
 
-**AFL/makefile**  
+**AFL/Makefile**  
 
 	PGSQL\_LIB\_PATH = /home/wx/openGauss-server/inst_build/lib  //libpq.so目录
 	PGSQL\_INCLUDE\_PATH = /home/wx/openGauss-server/inst_build/include //libpq-fe.h目录
@@ -71,11 +71,17 @@ start\_db函数。afl-fuzz会创建共享内存，并通过环境变量传递shm
 **corpus/initlib**  
 该目录下保存了工具使用的初始语料库，原则上可以向其中添加新语料。但是，需要确保添加到语料能够被工具解析。添加的语料不需要有完整上下文，实际读取时是按行读取SQL语句，因此需要确保一条SQL语句是一行。corpus/initlib/init_lib与程序正常运行有关，不能删除。
 
-**parser/**  
-编译afl-fuzz.c前，需要在parser目录下使用make生成.cpp和.h文件
+**编译**  
+该工具在Ubuntu20.04和CentOS7操作系统下可以运行，其他Linux系统应该也可以。  
+首先在parser/目录下执行make命令。在bison 3.0.4版本和flex 2.5.37版本下可以成功生成相关文件，低于该版本也可以，以能否执行成功为准。  
+之后进入AFL/目录下，执行make命令。在gcc 10.3.0版本下可以编译成功，只要支持C++17标准的版本应该都可以成功编译，最低版本大概是GCC 7.1。  
+连接数据库所需的头文件和动态库的位置需要自己设置，如果遇到找不到对应头文件或者动态库链接出错等问题请自行处理。
 
 **启动命令**  
 
 	/工具路径/AFL/afl-fuzz -i /工具路径/corpus/input -o /自定义输出目录 OpenGaussDB
 
 最后的"OpenGaussDB"参数没有实际意义。在AFL中，最后需要输入待测程序的路径。在本工具中，不需要这个参数，但是也没有修改AFL命令行参数解析部分。因此为了确保命令完整性，需要加上这个参数。
+
+**Unique Crash**  
+该工具沿袭了AFL原有的排除重复crash的方法，该方法在DBMS测试中是无效的，因此工具界面中的Unique Crash部分其实包含了重复的crash。建议在得到触发crash的语句后，手动或编写脚本去除重复的crash。
