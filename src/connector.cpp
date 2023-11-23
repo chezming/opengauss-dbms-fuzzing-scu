@@ -1,4 +1,4 @@
-#include "connector.h"
+#include "../include/connector.h"
 
 static void myproc(void* arg, const PGresult* res) {
 	return;
