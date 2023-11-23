@@ -115,7 +115,7 @@ using namespace std;
 #define PASSWORD "Aa1!@#$%^&*()"
 #define PORT 5432
 
-#define SERVERNAME "gaussdb"
+#define PIDFILEPATH "/home/omm/data/postmaster.pid"
 const char* file = "/home/wx/openGauss-server/inst_build/bin/gs_ctl";
 char* const options[] = { "/home/wx/openGauss-server/inst_build/bin/gs_ctl", "start", "-D", "/home/omm/data", "-Z", "single_node", "-l", "/home/omm/log/opengauss.log", NULL };
 
@@ -126,7 +126,7 @@ InputInfo* g_current_input = nullptr;
 
 Mutator g_mutator;
 Instantiator g_instantiator;
-Connector g_connector(HOST, USERNAME, PASSWORD, PORT, SERVERNAME);
+Connector g_connector(HOST, USERNAME, PASSWORD, PORT, PIDFILEPATH);
 
 EXP_ST u8 vaild_flag = 0;
 EXP_ST u64 total_vaild = 0;

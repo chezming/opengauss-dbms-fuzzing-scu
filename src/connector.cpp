@@ -1,32 +1,22 @@
-#include "../include/connector.h"
+#include "connector.h"
 
 static void myproc(void* arg, const PGresult* res) {
 	return;
 }
 
-Connector::Connector(const char* host, const char* userName, const char* password, unsigned int port, const char* serverName) {
+Connector::Connector(const char* host, const char* userName, const char* password, unsigned int port, const char* pidFIlePath) {
 	conninfo_ += "host=" + string(host) + " ";
 	conninfo_ += "user=" + string(userName) + " ";
 	conninfo_ += "password=" + string(password) + " ";
 	conninfo_ += "port=" + to_string(port);
 	
-	serverName_ = serverName;
+	pidFIlePath_ = pidFIlePath;
 
 	return;
 }
 
 bool Connector::start_db(const char* file, char* const options[]) {
-	pid_t dbPid = get_pid_by_name();
-
-	if (dbPid != 1) {
-		SQLSTATUS status = reset_db();
-
-		if (status == SQLSTATUS::ssNormal) {
-			return true;
-		}
-
-		return false;
-	}
+	int dbPid = get_pid();
 
 	int i = 0;
 	while (dbPid == 1 && i < 10) {
@@ -41,7 +31,7 @@ bool Connector::start_db(const char* file, char* const options[]) {
 			sleep(5);
 		}
 
-		dbPid = get_pid_by_name();
+		dbPid = get_pid();
 		i++;
 	}
 
@@ -56,7 +46,7 @@ bool Connector::start_db(const char* file, char* const options[]) {
 	return false;
 }
 bool Connector::close_db() {
-	pid_t dbPid = get_pid_by_name();
+	int dbPid = get_pid();
 	int res = -1;
 
 	if (dbPid != 1) {
@@ -133,45 +123,44 @@ SQLSTATUS Connector::reset_db() {
 	return res;
 }
 
-pid_t Connector::get_pid_by_name() {
-    DIR* dir;
-    struct dirent* ptr;
-    FILE* fp;
-    char filepath[50];
-    char cur_task_name[50];
-    char buf[BUF_SIZE];
+int Connector::get_pid() {
+	int res = 1;
 
-    pid_t pid = 1;
+	ifstream pidFile(pidFIlePath_);
+	if (pidFile.is_open()) {
+		string pidStr;
+		getline(pidFile, pidStr);
 
-    dir = opendir("/proc");
-    if (NULL != dir)
-    {
-        while ((ptr = readdir(dir)) != NULL)
-        {
+		pidFile.close();
 
-            if ((strcmp(ptr->d_name, ".") == 0) || (strcmp(ptr->d_name, "..") == 0))
-                continue;
-            if (DT_DIR != ptr->d_type)
-                continue;
+		bool flag = true;
 
-            sprintf(filepath, "/proc/%s/status", ptr->d_name);
-            fp = fopen(filepath, "r");
-            if (NULL != fp)
-            {
-                if (fgets(buf, BUF_SIZE - 1, fp) == NULL) {
-                    fclose(fp);
-                    continue;
-                }
-                sscanf(buf, "%*s %s", cur_task_name);
+		for (char c : pidStr) {
+			if (!isdigit(c)) {
+				flag = false;
+				break;
+			}
+		}
 
-                if (!strcmp(serverName_.c_str(), cur_task_name)) {
-                    sscanf(ptr->d_name, "%d", &pid);
-                }
-                fclose(fp);
-            }
-        }
-        closedir(dir);
-    }
+		if (flag == false || pidStr.empty()) {
+			cerr << "ERROR: Unrecognized PID --- " << pidStr << endl;
+			assert(flag == false || pidStr.empty());
+		}
 
-    return pid;
+		res = stoi(pidStr);
+	}
+
+	if (res != 1) {
+		string processStatusFilePath = "/proc/" + to_string(res) + "/status";
+		ifstream statusFile(processStatusFilePath);
+
+		if (statusFile.is_open()) {
+			statusFile.close();
+		}
+		else {
+			res = 1;
+		}
+	}
+
+	return res;
 }

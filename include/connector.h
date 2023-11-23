@@ -8,6 +8,10 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <stdlib.h>
+#include <fstream>
+#include <iostream>
+#include <ctype.h>
+#include <assert.h>
 
 #include "libpq-fe.h"
 
@@ -26,7 +30,7 @@ enum class SQLSTATUS {
 
 class Connector {
 public:
-	Connector(const char* host, const char* userName, const char* password, unsigned int port, const char* serverName);
+	Connector(const char* host, const char* userName, const char* password, unsigned int port, const char* pidFIlePath);
 
 	SQLSTATUS execute(const char* sql);
 	bool start_db(const char* file, char* const options[]);
@@ -34,11 +38,11 @@ public:
 
 private:
 	string conninfo_;
-	string serverName_;
+	string pidFIlePath_;
 
 	void reset_database(PGconn* conn);
 	SQLSTATUS reset_db();
-	pid_t get_pid_by_name();
+	int get_pid();
 };
 
 #endif
