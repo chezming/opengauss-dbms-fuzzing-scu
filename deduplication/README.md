@@ -22,6 +22,10 @@ GDB指令，需要修改的部分是gaussdb的路径和test.gdb的路径
 
 	#define GDBCMD "gdb /home/wx/openGauss-server/dest/bin/gaussdb " COREFILEPATH " -x /home/wx/check_unique_bug/test.gdb &> /dev/null"
 
+Python脚本会将堆栈信息写入文件，后续会从该文件读取堆栈信息，文件路径通过STACKINFOFILEPATH参数决定。
+
+	#define STACKINFOFILEPATH "/home/wx/core/result_test"
+
 去重结果文件路径，可以将目前已发现的出现crash的位置记录下来，并在之后的去重中使用  
 
 	#define UNIQUERESULTFILEPATH "/home/wx/check_unique_bug/unique_result"
@@ -32,7 +36,7 @@ test.gdb是gdb命令脚本，该脚本的唯一作用是在gdb启动后加载tes
 	source /home/wx/check_unique_bug/test.py
 
 **test.py参数调整**  
-该脚本会将gdb堆栈信息保存在文件中，该文件路径就是check_uniq_crash.cpp中的UNIQUERESULTFILEPATH
+该脚本会将gdb堆栈信息保存在文件中，该文件路径就是check_uniq_crash.cpp中的STACKINFOFILEPATH
 
 	with open("/home/wx/core/result_test", "w+") as fd:
 		fd.write(BTInfo);
