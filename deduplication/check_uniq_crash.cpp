@@ -29,6 +29,8 @@ char* const options[] = { "/home/wx/openGauss-server/dest/bin/gs_ctl", "start", 
 
 #define UNIQUERESULTFILEPATH "/home/wx/check_unique_bug/unique_result"
 
+#define STACKINFOFILEPATH "/home/wx/core/result_test"
+
 vector<string> uniqueResult;
 vector<string> skipFileName = { "bbox_create.cpp:404", "gs_bbox.cpp:112", "raise.c:55", "abort.c:90", "assert.cpp:46" };
 
@@ -109,7 +111,7 @@ bool analyseResult(string outputPath, string& sql) {
 	bool isUnique = false;
 	string uniqueCrashLocation;
 
-	ifstream inputFile("/home/wx/core/result_test");
+	ifstream inputFile(STACKINFOFILEPATH);
 	if (inputFile.is_open()) {
 		regex r(".*<signal handler called>.*");
 
