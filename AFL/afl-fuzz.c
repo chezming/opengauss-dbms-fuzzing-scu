@@ -70,6 +70,7 @@
 #include <sys/select.h>
 #include <errno.h>
 #include <cassert>
+#include <math.h>
 
 #include "../include/ast.h"
 #include "../include/mutate.h"
@@ -119,6 +120,8 @@ using namespace std;
 const char* file = "/home/wx/openGauss-server/inst_build/bin/gs_ctl";
 char* const options[] = { "/home/wx/openGauss-server/inst_build/bin/gs_ctl", "start", "-D", "/home/omm/data", "-Z", "single_node", "-l", "/home/omm/log/opengauss.log", NULL };
 
+#define MAX_FACTOR 32
+
 static long seed_count = 0;
 
 char* g_current_sql = nullptr;
@@ -149,6 +152,15 @@ EXP_ST u64 mem_limit  = MEM_LIMIT;    /* Memory cap for child (MB)        */
 
 static u32 stats_update_freq = 1;     /* Stats update frequency (execs)   */
 
+static u8 cooling_schedule = 0;       /* Cooling schedule for directed fuzzing */
+
+enum {
+  /* 00 */ SAN_EXP,                   /* Exponential schedule                  */
+  /* 01 */ SAN_LOG,                   /* Logarithmical schedule                */
+  /* 02 */ SAN_LIN,                   /* Linear schedule                       */
+  /* 03 */ SAN_QUAD                   /* Quadratic schedule                    */
+};
+
 EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
            force_deterministic,       /* Force deterministic stages?      */
            use_splicing,              /* Recombine input files?           */
@@ -169,6 +181,7 @@ EXP_ST u8  skip_deterministic,        /* Skip deterministic stages?       */
            shuffle_queue,             /* Shuffle input queue?             */
            bitmap_changed = 1,        /* Time to update bitmap?           */
            qemu_mode,                 /* Running in QEMU mode?            */
+           direct_mode=0,
            skip_requested,            /* Skip request, via SIGUSR1        */
            run_over10m,               /* Run time over 10 minutes?        */
            persistent_mode,           /* Running in persistent mode?      */
@@ -298,6 +311,7 @@ struct queue_entry {
       handicap,                       /* Number of queue cycles behind    */
       depth;                          /* Path depth                       */
 
+  double distance;
   u8* trace_mini;                     /* Trace bytes, if kept             */
   u32 tc_ref;                         /* Trace bytes ref count            */
 
@@ -326,6 +340,11 @@ static u32 extras_cnt;                /* Total number of tokens read      */
 
 static struct extra_data* a_extras;   /* Automatically selected extras    */
 static u32 a_extras_cnt;              /* Total number of tokens available */
+
+static double cur_distance = -1.0;     /* Distance of executed input             */
+static double max_distance = -1.0;     /* Maximal distance for any input         */
+static double min_distance = -1.0;     /* Minimal distance for any input         */
+static u32 t_x = 10; 
 
 static u8* (*post_handler)(u8* buf, u32* len);
 
@@ -835,6 +854,21 @@ static void add_to_queue(u8* fname, u32 len, u8 passed_det) {
   q->depth        = cur_depth + 1;
   q->passed_det   = passed_det;
 
+  if(direct_mode){
+    q->distance = cur_distance;
+
+    if (cur_distance > 0) {
+
+      if (max_distance <= 0) {
+        max_distance = cur_distance;
+        min_distance = cur_distance;
+      }
+      if (cur_distance > max_distance) max_distance = cur_distance;
+      if (cur_distance < min_distance) min_distance = cur_distance;
+
+    }
+  }
+
   if (q->depth > max_depth) max_depth = q->depth;
 
   if (queue_top) {
@@ -937,12 +971,33 @@ static inline u8 has_new_bits(u8* virgin_map) {
 
   u32  i = (MAP_SIZE >> 3);
 
+  if(direct_mode){
+    u64* total_distance = (u64*) (trace_bits + MAP_SIZE);
+    u64* total_count = (u64*) (trace_bits + MAP_SIZE + 8);
+
+    if (*total_count > 0)
+      cur_distance = (double) (*total_distance) / (double) (*total_count);
+    else
+      cur_distance = -1.0;
+  }
+
 #else
 
   u32* current = (u32*)trace_bits;
   u32* virgin  = (u32*)virgin_map;
 
   u32  i = (MAP_SIZE >> 2);
+
+  
+  if(direct_mode){
+    u32* total_distance = (u32*)(trace_bits + MAP_SIZE);
+    u32* total_count = (u32*)(trace_bits + MAP_SIZE + 4);
+
+    if (*total_count > 0) {
+      cur_distance = (double) (*total_distance) / (double) (*total_count);
+    else
+      cur_distance = -1.0;
+  }
 
 #endif /* ^__x86_64__ */
 
@@ -1398,7 +1453,14 @@ EXP_ST void setup_shm(void) {
   memset(virgin_tmout, 255, MAP_SIZE);
   memset(virgin_crash, 255, MAP_SIZE);
 
-  shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+  if(direct_mode){
+    /* Allocate 16 byte more for distance info */
+    shm_id = shmget(IPC_PRIVATE, MAP_SIZE + 16, IPC_CREAT | IPC_EXCL | 0600);
+  }
+  else{
+    shm_id = shmget(IPC_PRIVATE, MAP_SIZE, IPC_CREAT | IPC_EXCL | 0600);
+  }
+
 
   if (shm_id < 0) PFATAL("shmget() failed");
 
@@ -2142,7 +2204,7 @@ EXP_ST void init_forkserver(char** argv) {
                           "--pid-file=lrs-dwu01.pid",
                           "--socket=/tmp/mysql.sock",
                           NULL};
-    execv(tmp_target_path, tmp_argv); //改参数把，别改这里了,我再去看看那个启动参数
+    execv(tmp_target_path, tmp_argv); //改参数把，别改这里了,我再去看看那个启动参�?
 */
     /* Use a distinctive bitmap signature to tell the parent about execv()
        falling through. */
@@ -2331,8 +2393,12 @@ static u8 run_target(char** argv, u32 timeout) {
   /* After this memset, trace_bits[] are effectively volatile, so we
      must prevent any earlier operations from venturing into that
      territory. */
-
-  memset(trace_bits, 0, MAP_SIZE);
+  if(direct_mode){
+    memset(trace_bits, 0, MAP_SIZE + 16);
+  }
+  else{
+    memset(trace_bits, 0, MAP_SIZE);
+  }
   MEM_BARRIER();
 
 //**********************************
@@ -2502,6 +2568,27 @@ static u8 calibrate_case(char** argv, struct queue_entry* q, u8* use_mem,
 
     cksum = hash32(trace_bits, MAP_SIZE, HASH_CONST);
 
+    if(direct_mode){
+      if (q->distance <= 0) {
+
+      /* This calculates cur_distance */
+        has_new_bits(virgin_bits);
+
+        q->distance = cur_distance;
+        if (cur_distance > 0) {
+
+          if (max_distance <= 0) {
+            max_distance = cur_distance;
+            min_distance = cur_distance;
+          }
+          if (cur_distance > max_distance) max_distance = cur_distance;
+          if (cur_distance < min_distance) min_distance = cur_distance;
+
+        }
+
+      }
+    }
+
     if (q->exec_cksum != cksum) {
 
       u8 hnb = has_new_bits(virgin_bits);
@@ -2625,9 +2712,8 @@ static void perform_dry_run(char** argv) {
     u8* fn = strrchr((char *)q->fname, '/') + 1;
     
     ACTF("Attempting dry run with '%s'...", fn);
-
     fd = open(q->fname, O_RDONLY);
-    
+
     if (fd < 0) PFATAL("Unable to open '%s'", q->fname);
     
     use_mem = (u8*)malloc(q->len + 1);
@@ -2643,7 +2729,7 @@ static void perform_dry_run(char** argv) {
 
     IR* root = g_mutator.IR_parser(use_mem);
     free(use_mem);
-    
+
     if (root == nullptr) {
         q = q->next;
         continue;
@@ -2653,7 +2739,7 @@ static void perform_dry_run(char** argv) {
 
     char* tmp_str = ir_str.c_str();
     int siz = ir_str.size();
-    
+
     q->len = siz;
     
     res = calibrate_case(argv, q, tmp_str, 0, 1);
@@ -3077,9 +3163,15 @@ static u8 save_if_interesting(char** argv, void* mem, u32 len, u8 fault) {
     }
 
 #ifndef SIMPLE_FILES
-
-    fn = alloc_printf("%s/queue/id:%06u,%s", out_dir, queued_paths,
+    if(direct_mode){
+      fn = alloc_printf("%s/queue/id:%06u,%llu,%s", out_dir, queued_paths,
+                      get_cur_time() - start_time,
                       describe_op(hnb));
+    }
+    else{
+      fn = alloc_printf("%s/queue/id:%06u,%s", out_dir, queued_paths,
+                        describe_op(hnb));
+    }
 
 #else
 
@@ -3161,9 +3253,15 @@ error_check:
       }
 
 #ifndef SIMPLE_FILES
-
-      fn = alloc_printf("%s/hangs/id:%06llu,%s", out_dir,
+      if(direct_mode){
+        fn = alloc_printf("%s/hangs/id:%06llu,%llu,%s", out_dir,
+                        unique_hangs, get_cur_time() - start_time,
+                        describe_op(0));
+      }
+      else{
+        fn = alloc_printf("%s/hangs/id:%06llu,%s", out_dir,
                         unique_hangs, describe_op(0));
+      }
 
 #else
 
@@ -3205,9 +3303,15 @@ keep_as_crash:
       if (!unique_crashes) write_crash_readme();
 
 #ifndef SIMPLE_FILES
-
-      fn = alloc_printf("%s/crashes/id:%06llu,sig:%02u,%s", out_dir,
+      if(direct_mode){
+        fn = alloc_printf("%s/crashes/id:%06llu,%llu,sig:%02u,%s", out_dir,
+                        unique_crashes, get_cur_time() - start_time,
+                        kill_signal, describe_op(0));
+      }
+      else{
+        fn = alloc_printf("%s/crashes/id:%06llu,sig:%02u,%s", out_dir,
                         unique_crashes, kill_signal, describe_op(0));
+      }
 
 #else
 
@@ -4731,6 +4835,62 @@ static u32 calculate_score(struct queue_entry* q) {
   }
 
   /* Make sure that we don't go over limit. */
+  if(direct_mode){
+    u64 cur_ms = get_cur_time();
+    u64 t = (cur_ms - start_time) / 1000;
+    double progress_to_tx = ((double) t) / ((double) t_x * 60.0);
+
+    double T;
+
+    //TODO Substitute functions of exp and log with faster bitwise operations on integers
+    switch (cooling_schedule) {
+      case SAN_EXP:
+
+        T = 1.0 / pow(20.0, progress_to_tx);
+
+        break;
+
+      case SAN_LOG:
+
+        // alpha = 2 and exp(19/2) - 1 = 13358.7268297
+        T = 1.0 / (1.0 + 2.0 * log(1.0 + progress_to_tx * 13358.7268297));
+
+        break;
+
+      case SAN_LIN:
+
+        T = 1.0 / (1.0 + 19.0 * progress_to_tx);
+
+        break;
+
+      case SAN_QUAD:
+
+        T = 1.0 / (1.0 + 19.0 * pow(progress_to_tx, 2));
+
+        break;
+
+      default:
+        PFATAL ("Unkown Power Schedule for Directed Fuzzing");
+    }
+
+    double power_factor = 1.0;
+    if (q->distance > 0) {
+
+      double normalized_d = 0; // when "max_distance == min_distance", we set the normalized_d to 0 so that we can sufficiently explore those testcases whose distance >= 0.
+      if (max_distance != min_distance)
+        normalized_d = (q->distance - min_distance) / (max_distance - min_distance);
+
+      if (normalized_d >= 0) {
+
+          double p = (1.0 - normalized_d) * (1.0 - T) + 0.5 * T;
+          power_factor = pow(2.0, 2.0 * (double) log2(MAX_FACTOR) * (p - 0.5));
+
+      }// else WARNF ("Normalized distance negative: %f", normalized_d);
+
+    }
+
+    perf_score *= power_factor;
+  }
 
   if (perf_score > HAVOC_MAX_MULT * 100) perf_score = HAVOC_MAX_MULT * 100;
 
@@ -5556,6 +5716,14 @@ static void usage(u8* argv0) {
        "  -d            - quick & dirty mode (skips deterministic steps)\n"
        "  -n            - fuzz without instrumentation (dumb mode)\n"
        "  -x dir        - optional fuzzer dictionary (see README)\n\n"
+      
+       "Directed fuzzing specific settings:\n\n"
+
+       "  -D            - Directed fuzzing\n"
+       "  -z schedule   - temperature-based power schedules\n"
+       "                  {exp, log, lin, quad} (Default: exp)\n"
+       "  -c min        - time from start when SA enters exploitation\n"
+       "                  in secs (s), mins (m), hrs (h), or days (d)\n\n"
 
        "Other stuff:\n\n"
 
@@ -6191,6 +6359,15 @@ static void save_cmdline(u32 argc, char** argv) {
 
 }
 
+int stricmp(char const *a, char const *b) {
+  int d;
+  for (;; a++, b++) {
+    d = tolower(*a) - tolower(*b);
+    if (d != 0 || !*a)
+      return d;
+  }
+}
+
 #ifndef AFL_LIB
 
 char* g_server_path;
@@ -6215,8 +6392,8 @@ int main(int argc, char** argv) {
   gettimeofday(&tv, &tz);
   srandom(tv.tv_sec ^ tv.tv_usec ^ getpid());
 
-  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Q:s:c:")) > 0)
-
+  
+  while ((opt = getopt(argc, argv, "+i:o:f:m:t:T:dnCB:S:M:x:Qs:z:c:D")) > 0)
     switch (opt) {
       case 'i': /* input dir */
 
@@ -6386,6 +6563,52 @@ int main(int argc, char** argv) {
         if (!mem_limit_given) mem_limit = MEM_LIMIT_QEMU;
 
         break;
+      
+      case 'D': /* QEMU mode */
+
+        if (direct_mode) FATAL("Multiple -D options not supported");
+        direct_mode = 1;
+
+        break;
+      
+      case 'z': /* Cooling schedule for Directed Fuzzing */
+
+        if (!stricmp(optarg, "exp"))
+          cooling_schedule = SAN_EXP;
+        else if (!stricmp(optarg, "log"))
+          cooling_schedule = SAN_LOG;
+        else if (!stricmp(optarg, "lin"))
+          cooling_schedule = SAN_LIN;
+        else if (!stricmp(optarg, "quad"))
+          cooling_schedule = SAN_QUAD;
+        else
+          PFATAL ("Unknown value for option -z");
+
+        break;
+
+      case 'c': /* cut-off time for cooling schedule */
+      
+        {
+
+          u8 suffix = 'm';
+
+          if (sscanf(optarg, "%u%c", &t_x, &suffix) < 1 ||
+              optarg[0] == '-') FATAL("Bad syntax used for -c");
+
+          switch (suffix) {
+
+            case 's': t_x /= 60; break;
+            case 'm': break;
+            case 'h': t_x *= 60; break;
+            case 'd': t_x *= 60 * 24; break;
+
+            default:  FATAL("Unsupported suffix or bad syntax for -c");
+
+          }
+
+        }
+
+        break;
 
       default:
 
@@ -6484,6 +6707,7 @@ int main(int argc, char** argv) {
   //char* tmp_argv[] = {g_server_path, NULL};
   //init_forkserver(tmp_argv);
   // to do
+
   perform_dry_run(use_argv);
 
   cull_queue();
@@ -6524,7 +6748,6 @@ int main(int argc, char** argv) {
         seek_to--;
         queue_cur = queue_cur->next;
       }
-
       show_stats();
 
       if (not_on_tty) {
@@ -6547,7 +6770,7 @@ int main(int argc, char** argv) {
         sync_fuzzers(use_argv);
 
     }
-
+    
     skipped_fuzz = fuzz_one(use_argv);
 
     if (!stop_soon && sync_id && !skipped_fuzz) {
