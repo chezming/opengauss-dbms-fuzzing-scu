@@ -85,3 +85,104 @@ start\_db函数。afl-fuzz会创建共享内存，并通过环境变量传递shm
 
 **Unique Crash**  
 该工具沿袭了AFL原有的排除重复crash的方法，该方法在DBMS测试中是无效的，因此工具界面中的Unique Crash部分其实包含了重复的crash。建议在得到触发crash的语句后，手动或编写脚本去除重复的crash。
+
+**定向模糊测试**
+
+该功能用于对用户在项目中重点关注的文件，相关函数，指令进行更为集中的测试，该功能基于AFLGO构建，以下为该功能使用方法：
+
+1.编写BBtargets.txt。该文件用于指定用户想要集中测试的文件和函数，本工具所支持的指定测试目标的指令如下所示：
+	
+	
+	对某一文件进行测试：
+	src:文件名称                     例如：src:driver_error.cpp
+	文件名称                         例如：mc_poller_epoll.cpp
+
+	对某一函数进行测试：
+	fun:函数名称                     例如：fun:make_empty_conn_4cl
+
+	对某一文件特定行指令相关的基本块进行测试：
+	line:文件名称：指令对应行数       例如：line:comm_sock.cpp：221
+	文件名称：指令对应行数            例如：comm_sock.cpp：221
+
+2.编译距离计算文件（编译相关的工具以及环境如:Cmake,Ninja等请自行构建），进入主文件夹下的 instrument/distance_calculator/ 文件夹，执行以下命令：
+	
+	cmake -G Ninja ./
+    cmake --build ./
+
+3.下载OpenGauss数据库源码以及所下载版本和分支对应的编译好的三方库，请自行按照openGauss官网指导安装所需的软件依赖：
+    
+	git clone https://gitee.com/opengauss/openGauss-server.git &&\
+    cd openGauss-server  &&\
+    git checkout master
+
+    cd openGauss-server &&\
+	wget  https://opengauss.obs.cn-south-1.myhuaweicloud.com/latest/binarylibs/gcc10.3/openGauss-third_party_binarylibs_Centos7.6_x86_64.tar.gz &&\
+    tar -zxf openGauss-third_party_binarylibs_Centos7.6_x86_64.tar.gz
+
+4.设置OpenGauss编译所需的环境变量：
+	
+	export CODE_BASE=________     # openGauss-server的路径
+	export BINARYLIBS=________    # binarylibs的路径
+	export GAUSSHOME=$CODE_BASE/dest/      #输出文件夹
+	export GCC_PATH=$BINARYLIBS/buildtools/________    # gcc的版本，根据三方包中对应的gcc版本进行填写即可，一般有gcc7.3或gcc10.3两种
+	export CC=$GCC_PATH/gcc/bin/gcc
+	export CXX=$GCC_PATH/gcc/bin/g++
+	export LD_LIBRARY_PATH=$GAUSSHOME/lib:$GCC_PATH/gcc/lib64:$GCC_PATH/isl/lib:$GCC_PATH/mpc/lib/:$GCC_PATH/mpfr/lib/:$GCC_PATH/gmp/lib/:$LD_LIBRARY_PATH
+	export PATH=$GAUSSHOME/bin:$GCC_PATH/gcc/bin:$PATH
+
+5.进入 instrument/gcc_mode/ 文件，编译相关工具：
+    
+	make clean
+	make
+	
+编译成功后instrument目录下会出现gcc-fast和g++-fast两个可执行文件。
+
+6.回到OpenGauss源代码所在位置，按照OpenGauss官方编译步骤选择相应的 ./configure 命令并执行，命令执行完后修改编译源代码所使用的Makefile ,主要为/src/Makefile.global文件以及位于src/bin/pg_dump/Makefile位置的文件：
+	
+	
+	修改 gcc 为 gcc-fast 所在位置， g++为 g++-fast 所在位置， CFLAGS和CXXFLAGS 添加 -lsupc++ -lstdc++ -targets=BBtargets.txt所在位置 -outdir=BBtargets.txt所在目录 -flto -fuse-ld=gold -Wno-unused-parameter
+	
+设置环境变量:
+	
+	export AFLGO=本工具源码所在目录/instrument
+	export TMP_DIR=BBtargets.txt所在目录
+	
+	export CC=$AFLGO/gcc-fast
+	export CXX=$AFLGO/g++-fast
+
+	export COPY_CFLAGS=$CFLAGS
+	export COPY_CXXFLAGS=$CXXFLAGS
+	export ADDITIONAL="-targets=$TMP_DIR/BBtargets.txt -outdir=$TMP_DIR -flto -fuse-ld=gold -lsupc++ -lstdc++"
+	export CFLAGS="$CFLAGS $ADDITIONAL"
+	export CXXFLAGS="$CXXFLAGS $ADDITIONAL"
+	
+
+7.第一次编译OpenGauss源代码，在代码所在位置执行 make 命令:
+	
+	
+	make
+	
+
+8.编译完成后，可以通过检查$TMP_DIR目录下的Ftargets.txt文件确认PASS是否成功运行（若为空则运行失败）。之后进入instrument/gcc_scripts/文件夹执行以下命令：
+	
+	
+	$AFLGO/gcc_scripts/gen_distance_fast.py $AFLGO/gcc_scripts  $TMP_DIR
+	
+这个过程会持续较长时间，请耐心等待。计算过程会在$TMP_DIR目录下生成文件distance.cfg.txt。
+
+9.设置新的环境变量，更改Makefile相应的内容，对源代码进行第二次编译：
+	
+	
+	export CFLAGS="$COPY_CFLAGS -distance=$TMP_DIR/distance.cfg.txt -flto -fuse-ld=gold -Wno-unused-parameter -lsupc++ -lstdc++"
+	export CXXFLAGS="$COPY_CXXFLAGS -distance=$TMP_DIR/distance.cfg.txt -flto -fuse-ld=gold -Wno-unused-parameter -lsupc++ -lstdc++"
+	
+	make clean 
+	make
+	make install
+	
+
+10.之后按照本工具之前的教程连接数据库开始fuzz,连接时如果提示找不到"__afl_area_ptr",可以先用正常编译的文件暂时替换相应文件，当使用定向模糊测试功能时，在执行 afl-fuzz 命令时需添加 -D 选项来指定定向测试功能。
+	
+	
+	/工具路径/AFL/afl-fuzz -i /工具路径/corpus/input -o /自定义输出目录 -D -z exp -c 45m OpenGaussDB
+	
